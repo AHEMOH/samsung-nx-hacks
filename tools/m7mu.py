@@ -15,6 +15,7 @@ from argparse import ArgumentParser
 from collections import OrderedDict
 from math import ceil
 
+# M7MU structures
 P_TOP = "<IIIII"            # +0x0000,  20 bytes (file offsets) little-endian
 P_SDRAM = "144s"            # +0x0014, 144 bytes (array?)
 P_NAND = "225s"             # +0x00A4, 225 bytes (array? contains code block size - 2)
@@ -23,6 +24,11 @@ P_CODE_V2 = "II5s12s11s9s"  # variant2  45 bytes (longer version2, shorter model
 P_SECTION = "25I"           # +0x01B2, 100 bytes (offsets and section numbers)
 P_USER_CODE = "18s18s18s"   # +0x0216,  54 bytes (memory initialization?!)
 P_RESERVED = "<10sI"        # +0x024c, 436 bytes (unknown, contains filesize-20 at 0x256)
+
+# M6M2-J structures, mostly unknown
+P_M6M2J_TOP = ">II"         # +0x0000,   8 bytes (boot loader offset and size)
+P_M6M2J_UNKNOWN = "227s"    # +0x0008, 227 bytes (bunch of numbers, "P82\0PXX")
+P_M6M2J_NAMES = "5s8s4s7s13s" # +0x00eb, 37 bytes (hdr_version, date, time, version, model)
 
 parser = ArgumentParser()
 parser.add_argument('filenames', metavar='FILE.bin', nargs='+',
@@ -36,6 +42,9 @@ parser.add_argument('-x', '--extract',
 parser.add_argument('-t', '--table',
                     action='store_true', dest='table', default=False,
                     help='format output as markdown table')
+parser.add_argument('-6', '--m6m2j',
+                    action='store_true', dest='m6m2j', default=False,
+                    help='parse M6M2J header (WB2xx, WB800, WB3xF)')
 args = parser.parse_args()
 
 def print_row(name, value):
@@ -106,6 +115,8 @@ def dump_partitions(info, total_size):
     for i, l in zip(numbers, lengths):
         partitions.append((f"chunk-{i:02d}", offset, l))
         offset += ceil(l / block_size) * block_size
+    if not 'code_size' in info:
+        info['code_size'] = offset - info['offset_code']
     # 0x800 for SF_RESOURCE!?
     block_size = 0x800
     offset = ceil(offset / block_size) * block_size
@@ -131,16 +142,32 @@ def extract_files(f, filename, partitions):
     for fn, offset, size in partitions:
         extract_file(f, f"{dst}/{fn}.bin", offset, size)
 
+def dump_m6m2j_info(f):
+    info = OrderedDict()
+    dump_block(f, P_M6M2J_TOP, ["block_size", "writer_load_size"], info)
+    dump_block(f, P_M6M2J_UNKNOWN, ["unknown"], info)
+    dump_block(f, P_M6M2J_NAMES, ["hdr_version", "date", "time", "version", "model"], info)
+    dump_section_info(f, ">" + P_SECTION, info)
+    info['offset_code'] = info['block_size'] + info['writer_load_size']
+    return info
+
+def dump_m7mu_info(f):
+    info = OrderedDict()
+    dump_block(f, P_TOP, ["block_size", "writer_load_size", "write_code_entry", "sdram_param_size", "nand_param_size"], info)
+    dump_block(f, P_SDRAM, ["sdram_data"], info)
+    dump_block(f, P_NAND, ["nand_data"], info)
+    dump_code_info(f, info)
+    dump_section_info(f, P_SECTION, info)
+    dump_block(f, P_USER_CODE, ["pdr", "ddr", "epcr"], info)
+    dump_block(f, P_RESERVED, ["reserved", "firmware_size"], info)
+    return info
+
 def dump_fw_info(filename):
     with open(filename, "rb") as f:
-        info = OrderedDict()
-        dump_block(f, P_TOP, ["block_size", "writer_load_size", "write_code_entry", "sdram_param_size", "nand_param_size"], info)
-        dump_block(f, P_SDRAM, ["sdram_data"], info)
-        dump_block(f, P_NAND, ["nand_data"], info)
-        dump_code_info(f, info)
-        dump_section_info(f, P_SECTION, info)
-        dump_block(f, P_USER_CODE, ["pdr", "ddr", "epcr"], info)
-        dump_block(f, P_RESERVED, ["reserved", "firmware_size"], info)
+        if args.m6m2j:
+            info = dump_m6m2j_info(f)
+        else:
+            info = dump_m7mu_info(f)
         p = dump_partitions(info, os.fstat(f.fileno()).st_size)
         if args.extract:
             extract_files(f, filename, p)
